@@ -15,6 +15,13 @@
   const SCRAP_TTL = 11;
   const MAX_FIELD = 7;
   const PICK_R = 36;
+  // 길 위 거리. 적은 화면 위 밖(y=-30)에서 나오고, 이만큼 걸어야 몸 전체가 화면에 들어온다.
+  // 그 전에는 탑이 겨누지 않고 탄도 맞지 않는다. 보이기도 전에 죽는 일을 막는다.
+  const ENTER_D = 40;
+  // 고물은 이 높이보다 아래에만 떨어진다. 위쪽 띠에는 입구 그림과 조작 버튼(game.js drawHud)이 있다.
+  const DROP_TOP = 120;
+  // 처치 몇 마리에 고물 하나꼴인지. 이 수만큼의 처치 중 정확히 한 번 떨어진다(이전 16% 확률과 평균이 비슷하다).
+  const DROP_EVERY = 6;
 
   const SCRAPS = {
     pipe: { slot: "barrel", name: "굽은 파이프", desc: "포물선으로 떨어져 터진다", tip: "사거리 넓음 · 범위 피해 · 조금 느림" },
@@ -44,6 +51,28 @@
     "clock+funnel": "팽이",
     "gas+oil": "불기둥",
     "battery+motor": "누전",
+    "anvil+magnet": "철퇴",
+    "clock+ice": "냉각기",
+    "anvil+ice": "빙결 망치",
+    "battery+gas": "과충전",
+    "anvil+oil": "용광로",
+    "battery+rebar": "레일건",
+    "ice+spring": "얼음 구슬",
+    "funnel+motor": "벌집",
+  };
+
+  // 세 칸이 서로 모두 궁합인 탑. 포신마다 하나씩 있다. 공격력이 25% 더 오른다.
+  const FULL_SETS = {
+    "gas+oil+pipe": "지옥 포대",
+    "battery+motor+spring": "번개 폭풍",
+    "anvil+magnet+rebar": "파성추",
+    "clock+funnel+ice": "빙하기",
+  };
+  const FULL_INFO = {
+    "지옥 포대": "화염병·박격포·불기둥을 한 탑에 · 공격력 25% 추가",
+    "번개 폭풍": "연쇄번개·핀볼·누전을 한 탑에 · 공격력 25% 추가",
+    파성추: "자석 꼬챙이·말뚝·철퇴를 한 탑에 · 공격력 25% 추가",
+    빙하기: "눈보라·팽이·냉각기를 한 탑에 · 공격력 25% 추가",
   };
 
   // 궁합이 실제로 바꾸는 값. towerStats와 함께 고친다.
@@ -58,7 +87,23 @@
     팽이: "최대 연사 상승 60% → 78%",
     불기둥: "불길 피해 두 배",
     누전: "감전이 주변 5마리까지 번진다",
+    철퇴: "세 배 멀리 밀어내고 덩치도 잘 밀린다",
+    냉각기: "쉬어도 연사가 식지 않는다",
+    "빙결 망치": "맞은 적이 1초 동안 꽁꽁 언다",
+    과충전: "폭발탄이 네 발 → 두 발마다",
+    용광로: "불길이 두 배 오래 탄다",
+    레일건: "광선이 두 배 가까이 길고 굵어진다",
+    "얼음 구슬": "튕겨도 공격력이 줄지 않는다",
+    벌집: "한 번에 5발을 흩뿌린다",
   };
+
+  function fullKey(parts) {
+    return ["barrel", "war", "power"]
+      .map((slot) => parts[slot] && parts[slot].id)
+      .filter(Boolean)
+      .sort()
+      .join("+");
+  }
 
   function synergyKey(a, b) {
     return [a, b].sort().join("+");
@@ -125,6 +170,9 @@
       over: null,
       nextId: 1,
       kills: 0,
+      dropBag: [],
+      waveDrops: {},
+      waveKills: {},
       queue: [],
       enemies: [],
       bullets: [],
@@ -145,6 +193,8 @@
         idle: 0,
         shots: 0,
         angle: -Math.PI / 2,
+        kills: 0,
+        dealt: 0,
       })),
       events: [],
     };
@@ -191,10 +241,18 @@
       slow: 0.45,
       shockTargets: 2,
       puddleR: 36,
-      push: 16,
       rampMax: 0.6,
       gasSplash: 46,
       puddleMul: 1,
+      push: 16,
+      bruteResist: 0.2,
+      keepRamp: false,
+      freeze: 0,
+      gasEvery: 4,
+      puddleLife: 2.8,
+      lineMul: 1.45,
+      bounceKeep: false,
+      full: null,
       names: [],
     };
 
@@ -230,36 +288,63 @@
     if (s.names.includes("팽이")) s.rampMax = 0.78;
     if (s.names.includes("누전")) s.shockTargets = 5;
     if (s.names.includes("불기둥")) s.puddleMul = 2;
+    if (s.names.includes("철퇴")) {
+      s.push = 48;
+      s.bruteResist = 0.5;
+    }
+    if (s.names.includes("냉각기")) s.keepRamp = true;
+    if (s.names.includes("빙결 망치")) s.freeze = 1;
+    if (s.names.includes("과충전")) s.gasEvery = 2;
+    if (s.names.includes("용광로")) s.puddleLife = 5.6;
+    if (s.names.includes("레일건")) s.lineMul = 2.6;
+    if (s.names.includes("얼음 구슬")) s.bounceKeep = true;
+    if (s.names.includes("벌집")) s.pellets = 5;
+    s.full = FULL_SETS[fullKey(parts)] || null;
+    if (s.full) s.dmg *= 1.25;
 
     const extraLv = Object.values(parts).reduce((sum, p) => sum + (p ? p.lv - 1 : 0), 0);
     s.dmg *= 1 + 0.42 * extraLv;
     return s;
   }
 
-  function hurt(e, amount, noArmor) {
-    const armor = noArmor ? 0 : ENEMIES[e.type].armor;
-    e.hp -= Math.max(1, amount - armor);
+  function onField(e) {
+    return e.d >= ENTER_D;
+  }
+
+  // 피해를 주고 어느 탑이 무엇으로 깎았는지 남긴다. 탑별 처치·피해 집계와 화면의 죽는 모습에 쓴다.
+  function wound(S, e, amount, towerIndex, cause) {
+    const t = S.towers[towerIndex];
+    if (t && e.hp > 0) t.dealt += Math.min(e.hp, amount);
+    e.hp -= amount;
+    e.lastTower = towerIndex;
+    e.cause = cause;
+  }
+
+  function hurt(S, e, amount, st, towerIndex) {
+    const armor = st.noArmor ? 0 : ENEMIES[e.type].armor;
+    wound(S, e, Math.max(1, amount - armor), towerIndex, st.war || "shot");
   }
 
   function applyHit(S, st, towerIndex, e, dmg, hits) {
-    hurt(e, dmg, st.noArmor);
+    hurt(S, e, dmg, st, towerIndex);
     if (st.war === "ice") {
       e.slowT = 1.6;
       e.slow = st.slow;
+      if (st.freeze) e.freezeT = e.type === "brute" ? st.freeze * 0.5 : st.freeze;
     } else if (st.war === "battery") {
       const near = S.enemies
-        .filter((o) => o !== e && o.hp > 0 && !hits.includes(o.id) && Math.hypot(o.x - e.x, o.y - e.y) < 78)
+        .filter((o) => o !== e && o.hp > 0 && onField(o) && !hits.includes(o.id) && Math.hypot(o.x - e.x, o.y - e.y) < 78)
         .sort((a, b) => Math.hypot(a.x - e.x, a.y - e.y) - Math.hypot(b.x - e.x, b.y - e.y))
         .slice(0, st.shockTargets);
       for (const o of near) {
-        hurt(o, dmg * 0.45, st.noArmor);
+        hurt(S, o, dmg * 0.45, st, towerIndex);
         S.events.push({ type: "arc", ax: e.x, ay: e.y, bx: o.x, by: o.y });
       }
     } else if (st.war === "oil") {
-      S.puddles.push({ x: e.x, y: e.y, r: st.puddleR, t: 2.8, dps: (7 + dmg * 0.65) * st.puddleMul, tower: towerIndex });
+      S.puddles.push({ x: e.x, y: e.y, r: st.puddleR, t: st.puddleLife, dps: (7 + dmg * 0.65) * st.puddleMul, tower: towerIndex });
       if (S.puddles.length > 14) S.puddles.shift();
     } else if (st.war === "magnet") {
-      const resist = e.type === "brute" ? 0.2 : 1;
+      const resist = e.type === "brute" ? st.bruteResist : 1;
       e.d = Math.max(0, e.d - st.push * resist);
     }
   }
@@ -267,7 +352,7 @@
   function splash(S, st, towerIndex, x, y, radius, dmg) {
     S.events.push({ type: "blast", x, y, r: radius });
     for (const e of S.enemies) {
-      if (e.hp <= 0 || Math.hypot(e.x - x, e.y - y) > radius + ENEMIES[e.type].r) continue;
+      if (e.hp <= 0 || !onField(e) || Math.hypot(e.x - x, e.y - y) > radius + ENEMIES[e.type].r) continue;
       applyHit(S, st, towerIndex, e, dmg, []);
     }
   }
@@ -276,7 +361,7 @@
     t.shots += 1;
     let dmg = st.dmg;
     let burst = false;
-    if (st.power === "gas" && t.shots % 4 === 0) {
+    if (st.power === "gas" && t.shots % st.gasEvery === 0) {
       dmg *= 3.5;
       burst = true;
     }
@@ -287,13 +372,13 @@
     t.angle = Math.atan2(ly - t.y, lx - t.x);
 
     if (st.line) {
-      const len = st.range * 1.45;
+      const len = st.range * st.lineMul;
       const dx = Math.cos(t.angle);
       const dy = Math.sin(t.angle);
-      S.events.push({ type: "beam", ax: t.x, ay: t.y, bx: t.x + dx * len, by: t.y + dy * len, burst });
+      S.events.push({ type: "beam", ax: t.x, ay: t.y, bx: t.x + dx * len, by: t.y + dy * len, burst, rail: st.lineMul > 2 });
       const hits = [];
       for (const e of S.enemies) {
-        if (e.hp <= 0) continue;
+        if (e.hp <= 0 || !onField(e)) continue;
         const rx = e.x - t.x;
         const ry = e.y - t.y;
         const along = rx * dx + ry * dy;
@@ -354,13 +439,13 @@
       const st = towerStats(t);
       let best = null;
       for (const e of S.enemies) {
-        if (e.hp <= 0 || e.d < 0) continue;
+        if (e.hp <= 0 || !onField(e)) continue;
         if (Math.hypot(e.x - t.x, e.y - t.y) > st.range) continue;
         if (!best || e.d > best.d) best = e;
       }
       if (!best) {
         t.idle += DT;
-        if (t.idle > 1) t.ramp = 0;
+        if (t.idle > 1 && !st.keepRamp) t.ramp = 0;
         return;
       }
       t.idle = 0;
@@ -400,7 +485,8 @@
         b.x += (b.vx * DT) / 2;
         b.y += (b.vy * DT) / 2;
         const hit = S.enemies.find(
-          (e) => e.hp > 0 && !b.hits.includes(e.id) && Math.hypot(e.x - b.x, e.y - b.y) <= ENEMIES[e.type].r + 5,
+          (e) =>
+            e.hp > 0 && onField(e) && !b.hits.includes(e.id) && Math.hypot(e.x - b.x, e.y - b.y) <= ENEMIES[e.type].r + 5,
         );
         if (!hit) continue;
         b.hits.push(hit.id);
@@ -410,7 +496,7 @@
           let nextTarget = null;
           let nearest = Infinity;
           for (const e of S.enemies) {
-            if (e.hp <= 0 || b.hits.includes(e.id)) continue;
+            if (e.hp <= 0 || !onField(e) || b.hits.includes(e.id)) continue;
             const d = Math.hypot(e.x - hit.x, e.y - hit.y);
             if (d < 135 && d < nearest) {
               nearest = d;
@@ -419,7 +505,7 @@
           }
           if (nextTarget) {
             b.bounces -= 1;
-            b.dmg *= 0.88;
+            if (!st.bounceKeep) b.dmg *= 0.88;
             b.burst = false;
             b.x = hit.x;
             b.y = hit.y;
@@ -441,8 +527,8 @@
     for (const p of S.puddles) {
       p.t -= DT;
       for (const e of S.enemies) {
-        if (e.hp <= 0) continue;
-        if (Math.hypot(e.x - p.x, e.y - p.y) <= p.r + ENEMIES[e.type].r) e.hp -= p.dps * DT;
+        if (e.hp <= 0 || !onField(e)) continue;
+        if (Math.hypot(e.x - p.x, e.y - p.y) <= p.r + ENEMIES[e.type].r) wound(S, e, p.dps * DT, p.tower, "burn");
       }
     }
     S.puddles = S.puddles.filter((p) => p.t > 0);
@@ -463,7 +549,9 @@
   // 다른 고물이나 탑과 겹치지 않는 가까운 자리를 고른다.
   function freeSpot(S, x, y) {
     const clampX = (v) => Math.max(36, Math.min(W - 36, v));
-    const clampY = (v) => Math.max(36, Math.min(FIELD_H - 50, v));
+    const clampY = (v) => Math.max(DROP_TOP, Math.min(FIELD_H - 50, v));
+    // 입구 근처에서 죽은 적의 고물은 첫 꺾임 아래 길가로 내린다. 첫 탑과 겹치지 않는 왼쪽이다.
+    if (y < DROP_TOP) x = Math.min(x, 190);
     let px = clampX(x);
     let py = clampY(y);
     for (let i = 0; i < 14; i++) {
@@ -496,14 +584,37 @@
 
   const FIRST_DROPS = { 1: "barrel", 3: "war", 6: "power" };
 
+  // 처치 DROP_EVERY 마리를 한 묶음으로 보고 그중 한 마리만 고물을 흘린다. 운이 나빠도 공백이 길어지지 않는다.
+  function bagDrop(S) {
+    if (!S.dropBag.length) {
+      S.dropBag = Array.from({ length: DROP_EVERY }, (_, i) => i === 0);
+      for (let i = S.dropBag.length - 1; i > 0; i--) {
+        const j = Math.floor(next(S) * (i + 1));
+        [S.dropBag[i], S.dropBag[j]] = [S.dropBag[j], S.dropBag[i]];
+      }
+    }
+    return S.dropBag.pop();
+  }
+
+  // 그 웨이브의 마지막 적인가. 아직 안 나온 적과 살아 있는 적을 본다.
+  function lastOfWave(S, e) {
+    return !S.queue.some((q) => q.wave === e.wave) && !S.enemies.some((o) => o !== e && o.hp > 0 && o.wave === e.wave);
+  }
+
   function maybeDrop(S, e) {
     let slot = FIRST_DROPS[S.kills] || null;
     let drops = slot ? 1 : 0;
     if (e.type === "brute") drops = 2;
-    else if (!slot && S.field.length < MAX_FIELD && next(S) < 0.16) drops = 1;
+    else if (!slot && bagDrop(S)) drops = 1;
+    // 웨이브마다 적어도 하나는 떨어진다. 그 웨이브 적을 넷 잡거나 마지막 적을 잡을 때까지 없으면 보장한다.
+    S.waveKills[e.wave] = (S.waveKills[e.wave] || 0) + 1;
+    if (!drops && !S.waveDrops[e.wave] && (S.waveKills[e.wave] >= 4 || lastOfWave(S, e))) drops = 1;
     for (let i = 0; i < drops && S.field.length < MAX_FIELD; i++) {
       const scrap = rollScrap(S, slot);
-      if (scrap) placeScrap(S, scrap, e.x + i * 40, e.y);
+      if (scrap) {
+        placeScrap(S, scrap, e.x + i * 40, e.y);
+        S.waveDrops[e.wave] = (S.waveDrops[e.wave] || 0) + 1;
+      }
       slot = null;
     }
   }
@@ -516,7 +627,9 @@
         continue;
       }
       S.kills += 1;
-      S.events.push({ type: "kill", enemy: e.type, x: e.x, y: e.y });
+      const t = S.towers[e.lastTower];
+      if (t) t.kills += 1;
+      S.events.push({ type: "kill", id: e.id, enemy: e.type, x: e.x, y: e.y, tower: e.lastTower, cause: e.cause || "shot" });
       maybeDrop(S, e);
     }
     S.enemies = living;
@@ -543,9 +656,9 @@
       const item = S.queue.shift();
       const def = ENEMIES[item.type];
       const w = item.wave - 1;
-      const hp = def.hp * (1 + 0.3 * w + 0.045 * w * w);
+      const hp = def.hp * (1 + 0.3 * w + 0.055 * w * w);
       const [x, y] = posAt(0);
-      S.enemies.push({ id: S.nextId++, type: item.type, hp, maxHp: hp, d: 0, x, y, slow: 0, slowT: 0 });
+      S.enemies.push({ id: S.nextId++, type: item.type, wave: item.wave, hp, maxHp: hp, d: 0, x, y, slow: 0, slowT: 0 });
     }
   }
 
@@ -554,6 +667,10 @@
     for (const e of S.enemies) {
       const def = ENEMIES[e.type];
       if (e.slowT > 0) e.slowT -= DT;
+      if (e.freezeT > 0) {
+        e.freezeT -= DT;
+        continue;
+      }
       const slow = e.slowT > 0 ? e.slow : 0;
       e.d += def.speed * (1 - slow) * DT;
       [e.x, e.y] = posAt(e.d);
@@ -602,7 +719,7 @@
     }
     t.parts[slot] = { id: scrap, lv: 1 };
     if (current) placeScrap(S, current.id, t.x + 46, t.y + 30);
-    S.events.push({ type: "attach", tower: towerIndex, scrap, lv: 1, names: towerStats(t).names });
+    S.events.push({ type: "attach", tower: towerIndex, scrap, lv: 1, names: towerStats(t).names, full: towerStats(t).full });
     return true;
   }
 
@@ -746,11 +863,17 @@
     FORT_HP,
     MAX_LV,
     PICK_R,
+    MAX_FIELD,
+    ENTER_D,
+    DROP_TOP,
+    DROP_EVERY,
     SCRAPS,
     SCRAP_IDS,
     SLOT_NAMES,
     SYNERGIES,
     SYNERGY_INFO,
+    FULL_SETS,
+    FULL_INFO,
     ENEMIES,
     PATH,
     PATH_LEN,

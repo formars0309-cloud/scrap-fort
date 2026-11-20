@@ -1,4 +1,4 @@
-// 두 시제품이 함께 쓰는 난수, 기록, 소리. 일반 script와 node require 양쪽에서 읽힌다.
+// 난수, 기록, 소리. 게임 규칙(sim.js)과 화면(game.js)이 함께 쓴다. 일반 script와 node require 양쪽에서 읽힌다.
 (function (root) {
   // 상태 객체의 rng 필드만으로 이어지는 난수. 같은 시드면 같은 수열이 나온다.
   function next(state) {
